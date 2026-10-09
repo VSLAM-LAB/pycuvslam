@@ -63,6 +63,7 @@ def main():
     parser.add_argument("--verbose", type=str, help="verbose")
 
     args, _ = parser.parse_known_args()
+    verbose = args.verbose is not None and args.verbose != '0'  # rerun viewer only with verbose
 
     # Load camera name
     with open(args.settings_yaml, 'r') as file:
@@ -75,10 +76,10 @@ def main():
 
     # Configure tracker
     cfg_odom = cuvslam.Tracker.OdometryConfig(
-        async_sba=True,
+        async_sba=False,  # as in the cuVSLAM v17 examples
         enable_observations_export=True,
         enable_final_landmarks_export=True,
-        horizontal_stereo_camera=False,
+        rectified_stereo_camera=False,
         odometry_mode=cuvslam.Tracker.OdometryMode.RGBD,
         rgbd_settings=rgbd_settings)
 
@@ -91,27 +92,28 @@ def main():
     depth_list = df[f'path_{depth_name}'].to_list() 
     timestamps = df[f'ts_{cam_name} (ns)'].to_list()
 
-    # Setup rerun visualizer
-    rr.init('vslamlab_dataset', strict=True, spawn=True)
+    if verbose:
+        # Setup rerun visualizer
+        rr.init('vslamlab_dataset', strict=True, spawn=True)
 
-    # Setup coordinate basis for root
-    # cuvslam uses right-hand system with X-right, Y-down, Z-forward
-    rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
+        # Setup coordinate basis for root
+        # cuvslam uses right-hand system with X-right, Y-down, Z-forward
+        rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
-    # Setup rerun views
-    rr.send_blueprint(rrb.Blueprint(
-        rrb.TimePanel(state="collapsed"),
-        rrb.Horizontal(contents=[
-            rrb.Vertical(contents=[
-                rrb.Spatial2DView(origin='world/camera/image', name='RGB Camera'),
-                rrb.Spatial2DView(origin='world/camera/depth', name='Depth Camera')
+        # Setup rerun views
+        rr.send_blueprint(rrb.Blueprint(
+            rrb.TimePanel(state="collapsed"),
+            rrb.Horizontal(contents=[
+                rrb.Vertical(contents=[
+                    rrb.Spatial2DView(origin='world/camera/image', name='RGB Camera'),
+                    rrb.Spatial2DView(origin='world/camera/depth', name='Depth Camera')
+                ]),
+                rrb.Spatial3DView(
+                    name="3D",
+                    defaults=[rr.components.ImagePlaneDistance(0.5)]
+                )
             ]),
-            rrb.Spatial3DView(
-                name="3D",
-                defaults=[rr.components.ImagePlaneDistance(0.5)]
-            )
-        ]),
-    ), make_active=True)
+        ), make_active=True)
 
     trajectory_odom_t, trajectory_odom = [], []
     for t, imrel in enumerate(image_list):
@@ -134,40 +136,41 @@ def main():
         trajectory_odom_t.append(odom_pose.translation)
         trajectory_odom.append([timestamps[t]] + list(odom_pose.translation) + list(odom_pose.rotation))
 
-        # Get observations
-        observations = [tracker.get_last_observations(0)]
+        if verbose:
+            # Get observations
+            observations = [tracker.get_last_observations(0)]
         
-        # Extract observation points and colors
-        obs_uv = [[o.u, o.v] for o in observations[0]]
-        obs_colors = [color_from_id(o.id) for o in observations[0]]
+            # Extract observation points and colors
+            obs_uv = [[o.u, o.v] for o in observations[0]]
+            obs_colors = [color_from_id(o.id) for o in observations[0]]
 
-        # Log visualization data
-        rr.set_time_sequence('frame', timestamps[t])
-        rr.log('trajectory', rr.LineStrips3D(trajectory_odom_t), static=True)
+            # Log visualization data
+            rr.set_time_sequence('frame', timestamps[t])
+            rr.log('trajectory', rr.LineStrips3D(trajectory_odom_t), static=True)
 
-        rr.log(
-            "world/camera/rgb",
-            rr.Transform3D(
-                translation=odom_pose.translation,
-                quaternion=odom_pose.rotation
-            ),
-            rr.Arrows3D(
-                vectors=np.eye(3) * 0.2,
-                colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]]  # RGB for XYZ axes
+            rr.log(
+                "world/camera/rgb",
+                rr.Transform3D(
+                    translation=odom_pose.translation,
+                    quaternion=odom_pose.rotation
+                ),
+                rr.Arrows3D(
+                    vectors=np.eye(3) * 0.2,
+                    colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]]  # RGB for XYZ axes
+                )
             )
-        )
         
-        # Log RGB and depth images with observations
-        rr.log('world/camera/image', rr.Image(color_frame).compress(jpeg_quality=80))
-        rr.log(
-            'world/camera/image/observations',
-            rr.Points2D(obs_uv, radii=5, colors=obs_colors)
-        )
-        rr.log('world/camera/depth', rr.Image(depth_frame))
-        rr.log(
-            'world/camera/depth/observations',
-            rr.Points2D(obs_uv, radii=5, colors=obs_colors)
-        )
+            # Log RGB and depth images with observations
+            rr.log('world/camera/image', rr.Image(color_frame).compress(jpeg_quality=80))
+            rr.log(
+                'world/camera/image/observations',
+                rr.Points2D(obs_uv, radii=5, colors=obs_colors)
+            )
+            rr.log('world/camera/depth', rr.Image(depth_frame))
+            rr.log(
+                'world/camera/depth/observations',
+                rr.Points2D(obs_uv, radii=5, colors=obs_colors)
+            )
 
     keyframe_csv = args.exp_folder / f"{args.exp_it.zfill(5)}_KeyFrameTrajectory.csv"
     with open(keyframe_csv, "w", newline="") as f:

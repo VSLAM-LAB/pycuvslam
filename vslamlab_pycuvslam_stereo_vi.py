@@ -60,8 +60,8 @@ def load_calibration(calibration_yaml: Path, cam_l_name: str, cam_r_name: str, i
             imu = imu_
 
     cuvslam_imu = cuvslam.ImuCalibration()
-    imu_cam0_transform = (transform_to_cam0_reference(T_BS['l'], np.array(imu['T_BS']).reshape(4, 4)) 
-                             @ np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]]))
+    # cam0_from_imu, no axis flip (as in the cuVSLAM v17 EuRoC example)
+    imu_cam0_transform = transform_to_cam0_reference(T_BS['l'], np.array(imu['T_BS']).reshape(4, 4))
 
     cuvslam_imu.rig_from_imu = transform_to_pose(imu_cam0_transform.flatten().tolist())
     cuvslam_imu.gyroscope_noise_density = float(imu["sigma_g_c"])
@@ -89,6 +89,7 @@ def main():
     parser.add_argument("--verbose", type=str, help="verbose")
 
     args, _ = parser.parse_known_args()
+    verbose = args.verbose is not None and args.verbose != '0'  # rerun viewer only with verbose
 
     # Load camera and imu names
     with open(args.settings_yaml, 'r') as file:
@@ -104,10 +105,10 @@ def main():
 
     # Configure tracker
     cfg_odom = cuvslam.Tracker.OdometryConfig(
-        async_sba=True,
+        async_sba=False,  # as in the cuVSLAM v17 examples
         enable_observations_export=True,
         enable_final_landmarks_export=True,
-        horizontal_stereo_camera=False,
+        rectified_stereo_camera=False,
         odometry_mode=cuvslam.Tracker.OdometryMode.Inertial)
 
     # Initialize tracker
@@ -119,51 +120,52 @@ def main():
     images_right = df[f'path_{cam_r_name}'].to_list()
     timestamps = df[f'ts_{cam_l_name} (ns)'].to_list()
 
-    # Setup rerun visualizer
-    rr.init('vslamlab_dataset', strict=True, spawn=True)
+    if verbose:
+        # Setup rerun visualizer
+        rr.init('vslamlab_dataset', strict=True, spawn=True)
 
-    # Setup coordinate basis for root
-    # cuvslam uses right-hand system with X-right, Y-down, Z-forward
-    rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
+        # Setup coordinate basis for root
+        # cuvslam uses right-hand system with X-right, Y-down, Z-forward
+        rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
-    # Setup rerun views
-    rr.send_blueprint(
-        rrb.Blueprint(
-            rrb.TimePanel(state="collapsed"),
-            rrb.Horizontal(
-                column_shares=[0.5, 0.5],
-                contents=[
-                    rrb.Vertical(contents=[
-                        rrb.Horizontal(contents=[
-                            rrb.Spatial2DView(origin='world/camera_0'),
-                            rrb.Spatial2DView(origin='world/camera_1')
-                        ]),
+        # Setup rerun views
+        rr.send_blueprint(
+            rrb.Blueprint(
+                rrb.TimePanel(state="collapsed"),
+                rrb.Horizontal(
+                    column_shares=[0.5, 0.5],
+                    contents=[
                         rrb.Vertical(contents=[
+                            rrb.Horizontal(contents=[
+                                rrb.Spatial2DView(origin='world/camera_0'),
+                                rrb.Spatial2DView(origin='world/camera_1')
+                            ]),
+                            rrb.Vertical(contents=[
+                                rrb.TimeSeriesView(
+                                name="IMU Acceleration",
+                                origin="world/imu/accel",
+                                overrides={
+                                    "world/imu/accel/x": rr.SeriesLine.from_fields(color=[255, 0, 0]),
+                                    "world/imu/accel/y": rr.SeriesLine.from_fields(color=[0, 255, 0]),
+                                    "world/imu/accel/z": rr.SeriesLine.from_fields(color=[0, 0, 255]),
+                                },
+                            ),
                             rrb.TimeSeriesView(
-                            name="IMU Acceleration",
-                            origin="world/imu/accel",
-                            overrides={
-                                "world/imu/accel/x": rr.SeriesLine.from_fields(color=[255, 0, 0]),
-                                "world/imu/accel/y": rr.SeriesLine.from_fields(color=[0, 255, 0]),
-                                "world/imu/accel/z": rr.SeriesLine.from_fields(color=[0, 0, 255]),
-                            },
-                        ),
-                        rrb.TimeSeriesView(
-                            name="IMU Angular Velocity",
-                            origin="world/imu/gyro",
-                            overrides={
-                                "world/imu/gyro/x": rr.SeriesLine.from_fields(color=[255, 0, 0]),
-                                "world/imu/gyro/y": rr.SeriesLine.from_fields(color=[0, 255, 0]),
-                                "world/imu/gyro/z": rr.SeriesLine.from_fields(color=[0, 0, 255]),
-                            },
-                        )
-                        ])
-                    ]),
-                    rrb.Spatial3DView(origin='world')
-                ]
+                                name="IMU Angular Velocity",
+                                origin="world/imu/gyro",
+                                overrides={
+                                    "world/imu/gyro/x": rr.SeriesLine.from_fields(color=[255, 0, 0]),
+                                    "world/imu/gyro/y": rr.SeriesLine.from_fields(color=[0, 255, 0]),
+                                    "world/imu/gyro/z": rr.SeriesLine.from_fields(color=[0, 0, 255]),
+                                },
+                            )
+                            ])
+                        ]),
+                        rrb.Spatial3DView(origin='world')
+                    ]
+                )
             )
         )
-    )
 
     # Load sequecne images and imu readings
     frames_metadata = [{
@@ -237,47 +239,48 @@ def main():
         # Gravity estimation requires collecting sufficient number of keyframes with motion diversity
         gravity = tracker.get_last_gravity()
 
-        # Visualize
-        rr.set_time_sequence("frame", frame_id)
-        rr.log("world/trajectory", rr.LineStrips3D(trajectory_odom_t), static=True)
-        rr.log(
-            "world/camera_0",
-            rr.Transform3D(
-                translation=odom_pose.translation,
-                quaternion=odom_pose.rotation
-            ),
-            rr.Arrows3D(
-                vectors=np.eye(3) * 0.2,
-                colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]]  # RGB for XYZ axes
+        if verbose:
+            # Visualize
+            rr.set_time_sequence("frame", frame_id)
+            rr.log("world/trajectory", rr.LineStrips3D(trajectory_odom_t), static=True)
+            rr.log(
+                "world/camera_0",
+                rr.Transform3D(
+                    translation=odom_pose.translation,
+                    quaternion=odom_pose.rotation
+                ),
+                rr.Arrows3D(
+                    vectors=np.eye(3) * 0.2,
+                    colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]]  # RGB for XYZ axes
+                )
             )
-        )
 
-        points = np.array([[obs.u, obs.v] for obs in current_observations_main_cam])
-        colors = np.array([color_from_id(obs.id) for obs in current_observations_main_cam])
-        rr.log(
-            "world/camera_0/observations",
-            rr.Points2D(positions=points, colors=colors, radii=5.0),
-            rr.Image(images[0]).compress(jpeg_quality=80)
-        )
+            points = np.array([[obs.u, obs.v] for obs in current_observations_main_cam])
+            colors = np.array([color_from_id(obs.id) for obs in current_observations_main_cam])
+            rr.log(
+                "world/camera_0/observations",
+                rr.Points2D(positions=points, colors=colors, radii=5.0),
+                rr.Image(images[0]).compress(jpeg_quality=80)
+            )
 
-        rr.log(
-            "world/camera_1/observations",
-            rr.Points2D(positions=points, colors=colors, radii=5.0),
-            rr.Image(images[1]).compress(jpeg_quality=80)
-        )
+            rr.log(
+                "world/camera_1/observations",
+                rr.Points2D(positions=points, colors=colors, radii=5.0),
+                rr.Image(images[1]).compress(jpeg_quality=80)
+            )
         
-        rr.log(
-            "world/camera_0/gravity",
-            rr.Arrows3D(vectors=gravity, colors=[[255, 0, 0]], radii=0.015)
-        )
-        if accel_data and len(accel_data) >= 3:
-            rr.log("world/imu/accel/x", rr.Scalar(accel_data[0]), static=False)
-            rr.log("world/imu/accel/y", rr.Scalar(accel_data[1]), static=False)
-            rr.log("world/imu/accel/z", rr.Scalar(accel_data[2]), static=False)
-        if gyro_data and len(gyro_data) >= 3:
-            rr.log("world/imu/gyro/x", rr.Scalar(gyro_data[0]), static=False)
-            rr.log("world/imu/gyro/y", rr.Scalar(gyro_data[1]), static=False)
-            rr.log("world/imu/gyro/z", rr.Scalar(gyro_data[2]), static=False)
+            rr.log(
+                "world/camera_0/gravity",
+                rr.Arrows3D(vectors=gravity, colors=[[255, 0, 0]], radii=0.015)
+            )
+            if accel_data and len(accel_data) >= 3:
+                rr.log("world/imu/accel/x", rr.Scalar(accel_data[0]), static=False)
+                rr.log("world/imu/accel/y", rr.Scalar(accel_data[1]), static=False)
+                rr.log("world/imu/accel/z", rr.Scalar(accel_data[2]), static=False)
+            if gyro_data and len(gyro_data) >= 3:
+                rr.log("world/imu/gyro/x", rr.Scalar(gyro_data[0]), static=False)
+                rr.log("world/imu/gyro/y", rr.Scalar(gyro_data[1]), static=False)
+                rr.log("world/imu/gyro/z", rr.Scalar(gyro_data[2]), static=False)
 
         frame_id += 1
 

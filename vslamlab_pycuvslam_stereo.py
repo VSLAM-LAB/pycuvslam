@@ -69,6 +69,7 @@ def main():
     parser.add_argument("--verbose", type=str, help="verbose")
 
     args, _ = parser.parse_known_args()
+    verbose = args.verbose is not None and args.verbose != '0'  # rerun viewer only with verbose
 
     # Load camera names
     with open(args.settings_yaml, 'r') as file:
@@ -83,10 +84,10 @@ def main():
 
     # Configure tracker
     cfg_odom = cuvslam.Tracker.OdometryConfig(
-        async_sba=True,
+        async_sba=False,  # as in the cuVSLAM v17 examples
         enable_observations_export=True,
         enable_final_landmarks_export=True,
-        horizontal_stereo_camera=False,
+        rectified_stereo_camera=False,
         odometry_mode=cuvslam.Tracker.OdometryMode.Multicamera)
 
     # Initialize tracker
@@ -98,31 +99,32 @@ def main():
     images_right = df[f'path_{cam_r_name}'].to_list()
     timestamps = df[f'ts_{cam_l_name} (ns)'].to_list()
 
-    # Setup rerun visualizer
-    rr.init('vslamlab_dataset', strict=True, spawn=True)
+    if verbose:
+        # Setup rerun visualizer
+        rr.init('vslamlab_dataset', strict=True, spawn=True)
 
-    # Setup coordinate basis for root
-    # cuvslam uses right-hand system with X-right, Y-down, Z-forward
-    rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
+        # Setup coordinate basis for root
+        # cuvslam uses right-hand system with X-right, Y-down, Z-forward
+        rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
-    # Setup rerun views
-    rr.send_blueprint(
-        rrb.Blueprint(
-            rrb.TimePanel(state="collapsed"),
-            rrb.Horizontal(
-                column_shares=[0.5, 0.5],
-                contents=[
-                    rrb.Vertical(contents=[
-                        rrb.Horizontal(contents=[
-                            rrb.Spatial2DView(origin='world/camera_0'),
-                            rrb.Spatial2DView(origin='world/camera_1')
-                        ]),                    
-                    ]),
-                    rrb.Spatial3DView(origin='world')
-                ]
+        # Setup rerun views
+        rr.send_blueprint(
+            rrb.Blueprint(
+                rrb.TimePanel(state="collapsed"),
+                rrb.Horizontal(
+                    column_shares=[0.5, 0.5],
+                    contents=[
+                        rrb.Vertical(contents=[
+                            rrb.Horizontal(contents=[
+                                rrb.Spatial2DView(origin='world/camera_0'),
+                                rrb.Spatial2DView(origin='world/camera_1')
+                            ]),                    
+                        ]),
+                        rrb.Spatial3DView(origin='world')
+                    ]
+                )
             )
         )
-    )
 
     trajectory_odom_t, trajectory_odom = [], []
     for t, (imgL, imgR) in enumerate(zip(images_left, images_right)):
@@ -144,34 +146,35 @@ def main():
         trajectory_odom_t.append(odom_pose.translation)
         trajectory_odom.append([timestamps[t]] + list(odom_pose.translation) + list(odom_pose.rotation))
        
-        # Visualize
-        rr.set_time_sequence("frame", t)
-        rr.log("world/trajectory", rr.LineStrips3D(trajectory_odom_t), static=True)
-        rr.log(
-            "world/camera_0",
-            rr.Transform3D(
-                translation=odom_pose.translation,
-                quaternion=odom_pose.rotation
-            ),
-            rr.Arrows3D(
-                vectors=np.eye(3) * 0.2,
-                colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]]  # RGB for XYZ axes
+        if verbose:
+            # Visualize
+            rr.set_time_sequence("frame", t)
+            rr.log("world/trajectory", rr.LineStrips3D(trajectory_odom_t), static=True)
+            rr.log(
+                "world/camera_0",
+                rr.Transform3D(
+                    translation=odom_pose.translation,
+                    quaternion=odom_pose.rotation
+                ),
+                rr.Arrows3D(
+                    vectors=np.eye(3) * 0.2,
+                    colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]]  # RGB for XYZ axes
+                )
             )
-        )
 
-        points = np.array([[obs.u, obs.v] for obs in current_observations_main_cam])
-        colors = np.array([color_from_id(obs.id) for obs in current_observations_main_cam])
-        rr.log(
-            "world/camera_0/observations",
-            rr.Points2D(positions=points, colors=colors, radii=5.0),
-            rr.Image(images[0]).compress(jpeg_quality=80)
-        )
+            points = np.array([[obs.u, obs.v] for obs in current_observations_main_cam])
+            colors = np.array([color_from_id(obs.id) for obs in current_observations_main_cam])
+            rr.log(
+                "world/camera_0/observations",
+                rr.Points2D(positions=points, colors=colors, radii=5.0),
+                rr.Image(images[0]).compress(jpeg_quality=80)
+            )
 
-        rr.log(
-            "world/camera_1/observations",
-            rr.Points2D(positions=points, colors=colors, radii=5.0),
-            rr.Image(images[1]).compress(jpeg_quality=80)
-        )
+            rr.log(
+                "world/camera_1/observations",
+                rr.Points2D(positions=points, colors=colors, radii=5.0),
+                rr.Image(images[1]).compress(jpeg_quality=80)
+            )
         
     keyframe_csv = args.exp_folder / f"{args.exp_it.zfill(5)}_KeyFrameTrajectory.csv"
     with open(keyframe_csv, "w", newline="") as f:
